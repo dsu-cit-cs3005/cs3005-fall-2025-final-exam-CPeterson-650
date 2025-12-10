@@ -1,65 +1,90 @@
 #include <iostream>
 #include <dlfcn.h>
 #include <vector>
-#include <cmath>
+#include <iomanip>
+#include <algorithm>
 #include "RobotBase.h"
 #include "RadarObj.h"
+
+//
+// =========================================================
+//  ARENA CONSTANTS
+// =========================================================
+//
 
 static const int BOARD_ROWS = 20;
 static const int BOARD_COLS = 20;
 
-// --------------------------------------------------------
-// Weapon damage helper
-// --------------------------------------------------------
-int weapon_damage(RobotBase* R) {
-    switch (R->get_weapon()) {
-        case flamethrower: return 4;
-        case railgun:      return 3;
-        case grenade:      return 5;
-        case hammer:       return 2;
+//
+// =========================================================
+//  WEAPON DAMAGE TABLE  (Professor style)
+// =========================================================
+//
+
+int get_weapon_damage(WeaponType w)
+{
+    switch (w)
+    {
+        case flamethrower: return 5;
+        case railgun:      return 12;
+        case grenade:      return 20;
+        case hammer:       return 8;
+        default:           return 0;
     }
-    return 1;
 }
 
-// --------------------------------------------------------
-// Simple hit check
-// --------------------------------------------------------
-bool shot_hits_robot(int sr, int sc, int rr, int rc) {
-    return (sr == rr && sc == rc);
+//
+// =========================================================
+//  SIMPLE SHOT CHECK
+// =========================================================
+//
+
+bool shot_hits_robot(int shot_r, int shot_c, int robot_r, int robot_c)
+{
+    return (shot_r == robot_r && shot_c == robot_c);
 }
 
-// --------------------------------------------------------
-// Radar scanning
-// --------------------------------------------------------
-std::vector<RadarObj> perform_radar_scan(
-        int start_row, int start_col, int direction,
-        const std::vector<RadarObj>& obstacles,
-        int enemy_row, int enemy_col)
+//
+// =========================================================
+//  RADAR SCAN FUNCTION (8-direction line scan)
+// =========================================================
+//
+
+std::vector<RadarObj> perform_radar_scan(int start_r, int start_c, int direction,
+                                         const std::vector<RadarObj> &obstacles,
+                                         int enemy_r, int enemy_c)
 {
     std::vector<RadarObj> results;
 
-    int dr[8] = {-1,-1, 0, 1, 1, 1, 0,-1};
-    int dc[8] = { 0, 1, 1, 1, 0,-1,-1,-1};
+    // movement vectors for 8 directions
+    int dr[8] = {-1,-1,0,1,1,1,0,-1};
+    int dc[8] = { 0, 1,1,1,0,-1,-1,-1};
 
-    int r = start_row;
-    int c = start_col;
+    int r = start_r;
+    int c = start_c;
 
-    while (true) {
+    while (true)
+    {
         r += dr[direction];
         c += dc[direction];
 
         if (r < 0 || c < 0 || r >= BOARD_ROWS || c >= BOARD_COLS)
             break;
 
-        if (r == enemy_row && c == enemy_col) {
-            results.emplace_back('R', r, c);
+        // enemy seen
+        if (r == enemy_r && c == enemy_c)
+        {
+            results.push_back(RadarObj('R', r, c));
             break;
         }
 
-        for (auto &ob : obstacles) {
-            if (ob.m_row == r && ob.m_col == c) {
+        // obstacle check
+        for (auto &ob : obstacles)
+        {
+            if (ob.m_row == r && ob.m_col == c)
+            {
                 results.push_back(ob);
-                return results;   // radar stops at obstacle
+                return results;
             }
         }
     }
@@ -67,178 +92,209 @@ std::vector<RadarObj> perform_radar_scan(
     return results;
 }
 
-// --------------------------------------------------------
-// Dynamic loading of robot SO
-// --------------------------------------------------------
-RobotBase* load_robot(const char* so_path, void*& handle_out) {
-    handle_out = dlopen(so_path, RTLD_LAZY);
-    if (!handle_out) {
-        std::cerr << "Error loading " << so_path << ": " << dlerror() << "\n";
+//
+// =========================================================
+//  ARENA DISPLAY (Professor style)
+// =========================================================
+//
+
+void print_arena(int round,
+                 int A_r, int A_c,
+                 int B_r, int B_c,
+                 const std::vector<RadarObj> &obstacles)
+{
+    std::cout << "=========== starting round " << round << " ===========\n   ";
+
+    // column labels
+    for (int c = 0; c < BOARD_COLS; c++)
+        std::cout << std::setw(2) << c;
+    std::cout << "\n";
+
+    for (int r = 0; r < BOARD_ROWS; r++)
+    {
+        std::cout << std::setw(2) << r << " ";
+
+        for (int c = 0; c < BOARD_COLS; c++)
+        {
+            char ch = '.';
+
+            // obstacles
+            for (auto &o : obstacles)
+                if (o.m_row == r && o.m_col == c)
+                    ch = o.m_type;
+
+            // robots overwrite obstacles visually
+            if (r == A_r && c == A_c) ch = 'A';
+            if (r == B_r && c == B_c) ch = 'B';
+
+            std::cout << " " << ch;
+        }
+        std::cout << "\n";
+    }
+}
+
+//
+// =========================================================
+//  ROBOT LOADING
+// =========================================================
+//
+
+RobotBase *load_robot(const char *path, void *&handle)
+{
+    handle = dlopen(path, RTLD_LAZY);
+    if (!handle)
+    {
+        std::cerr << "dlopen error: " << dlerror() << "\n";
         return nullptr;
     }
 
-    typedef RobotBase* (*create_fn)();
-    create_fn create_robot = (create_fn)dlsym(handle_out, "create_robot");
-    if (!create_robot) {
-        std::cerr << "Error: create_robot not found in " << so_path << "\n";
+    typedef RobotBase *(*CreateFn)();
+    CreateFn create_robot = (CreateFn)dlsym(handle, "create_robot");
+
+    if (!create_robot)
+    {
+        std::cerr << "ERROR: create_robot() not found in " << path << "\n";
         return nullptr;
     }
+
     return create_robot();
 }
 
-// --------------------------------------------------------
-// Board Print
-// --------------------------------------------------------
+//
+// =========================================================
+//  MAIN ARENA LOOP
+// =========================================================
+//
 
-void print_board(int A_row, int A_col, char A_char,
-                 int B_row, int B_col, char B_char,
-                 const std::vector<RadarObj>& obstacles)
+int main(int argc, char **argv)
 {
-    // Create empty board
-    char board[BOARD_ROWS][BOARD_COLS];
-
-    for (int r = 0; r < BOARD_ROWS; r++)
-        for (int c = 0; c < BOARD_COLS; c++)
-            board[r][c] = '.';  // empty space
-
-    // Place obstacles
-    for (const auto& obj : obstacles)
+    if (argc < 3)
     {
-        board[obj.m_row][obj.m_col] = obj.m_type;
-    }
-
-    // Place robots
-    board[A_row][A_col] = A_char;
-    board[B_row][B_col] = B_char;
-
-    // Print board
-    std::cout << "\n=== ARENA ===\n";
-    for (int r = 0; r < BOARD_ROWS; r++)
-    {
-        for (int c = 0; c < BOARD_COLS; c++)
-            std::cout << board[r][c] << ' ';
-        std::cout << '\n';
-    }
-    std::cout << '\n';
-}
-
-
-// --------------------------------------------------------
-// MAIN ARENA SIMULATION
-// --------------------------------------------------------
-int main(int argc, char** argv)
-{
-    if (argc < 3) {
         std::cout << "Usage: ./RobotWarz robot1.so robot2.so\n";
         return 0;
     }
 
-    void* handle1 = nullptr;
-    void* handle2 = nullptr;
+    // load robots
+    void *h1 = nullptr, *h2 = nullptr;
+    RobotBase *A = load_robot(argv[1], h1);
+    RobotBase *B = load_robot(argv[2], h2);
 
-    RobotBase* A = load_robot(argv[1], handle1);
-    RobotBase* B = load_robot(argv[2], handle2);
     if (!A || !B) return -1;
 
-    // board limits
+    // boundaries
     A->set_boundaries(BOARD_ROWS, BOARD_COLS);
     B->set_boundaries(BOARD_ROWS, BOARD_COLS);
 
-    // starting positions
-    int A_row = 2, A_col = 2;
-    int B_row = 10, B_col = 10;
+    // starting locations
+    int A_r = 2,  A_c = 2;
+    int B_r = 17, B_c = 14;
 
-    A->move_to(A_row, A_col);
-    B->move_to(B_row, B_col);
+    A->move_to(A_r, A_c);
+    B->move_to(B_r, B_c);
 
-    // obstacles on board
-    std::vector<RadarObj> obstacles = {
-        {'M', 5, 5},
-        {'P', 12, 8},
-        {'F', 3, 15}
+    // fixed arena obstacles
+    std::vector<RadarObj> obstacles =
+    {
+        {'M',12,11},
+        {'M',13,11},
+        {'M',14,11},
+        {'F', 6,14},
+        {'P',10, 1}
     };
 
-    int turn = 0;
+    //
+    //  MAIN TURN LOOP
+    //
+    int round = 0;
+    while (true)
+    {
+        print_arena(round, A_r, A_c, B_r, B_c, obstacles);
 
-    while (true) {
-        turn++;
-        std::cout << "\n=== TURN " << turn << " ===\n";
-
-        // -------- Radar: A scans --------
+        //
+        // ================= ROBOT A TURN =================
+        //
         int scan_dir;
         A->get_radar_direction(scan_dir);
-        auto A_scan = perform_radar_scan(A_row, A_col, scan_dir, obstacles, B_row, B_col);
-        A->process_radar_results(A_scan);
+        auto radar_A = perform_radar_scan(A_r, A_c, scan_dir, obstacles, B_r, B_c);
+        A->process_radar_results(radar_A);
 
-        // -------- Radar: B scans --------
-        B->get_radar_direction(scan_dir);
-        auto B_scan = perform_radar_scan(B_row, B_col, scan_dir, obstacles, A_row, A_col);
-        B->process_radar_results(B_scan);
-
-        // -------- A Shoots --------
         int shot_r, shot_c;
-        if (A->get_shot_location(shot_r, shot_c)) {
-            std::cout << "A fires at (" << shot_r << "," << shot_c << ")\n";
-            if (shot_hits_robot(shot_r, shot_c, B_row, B_col)) {
-                std::cout << "B is hit!\n";
-                B->take_damage(weapon_damage(A));
+        if (A->get_shot_location(shot_r, shot_c))
+        {
+            std::cout << "A SHOOTS at (" << shot_r << "," << shot_c << ")\n";
+            if (shot_hits_robot(shot_r, shot_c, B_r, B_c))
+            {
+                int dmg = get_weapon_damage(A->get_weapon());
+                std::cout << "B IS HIT! Damage = " << dmg << "\n";
+                B->take_damage(dmg);
             }
         }
 
-        // -------- B Shoots --------
-        if (B->get_shot_location(shot_r, shot_c)) {
-            std::cout << "B fires at (" << shot_r << "," << shot_c << ")\n";
-            if (shot_hits_robot(shot_r, shot_c, A_row, A_col)) {
-                std::cout << "A is hit!\n";
-                A->take_damage(weapon_damage(B));
+        //
+        // ================= ROBOT B TURN =================
+        //
+        B->get_radar_direction(scan_dir);
+        auto radar_B = perform_radar_scan(B_r, B_c, scan_dir, obstacles, A_r, A_c);
+        B->process_radar_results(radar_B);
+
+        if (B->get_shot_location(shot_r, shot_c))
+        {
+            std::cout << "B SHOOTS at (" << shot_r << "," << shot_c << ")\n";
+            if (shot_hits_robot(shot_r, shot_c, A_r, A_c))
+            {
+                int dmg = get_weapon_damage(B->get_weapon());
+                std::cout << "A IS HIT! Damage = " << dmg << "\n";
+                A->take_damage(dmg);
             }
         }
 
-        // Check death before movement
-        if (A->get_armor() <= 0 || A->get_health() <= 0) {
-            std::cout << "B WINS!\n"; break;
-        }
-        if (B->get_armor() <= 0 || B->get_health() <= 0) {
-            std::cout << "A WINS!\n"; break;
-        }
-
-        // -------- Move A --------
+        //
+        // ================= MOVEMENT =================
+        //
         int move_dir, move_dist;
+        int dr[8] = {-1,-1,0,1,1,1,0,-1};
+        int dc[8] = { 0, 1,1,1,0,-1,-1,-1};
+
+        // A moves
         A->get_move_direction(move_dir, move_dist);
+        A_r = std::clamp(A_r + dr[move_dir] * move_dist, 0, BOARD_ROWS - 1);
+        A_c = std::clamp(A_c + dc[move_dir] * move_dist, 0, BOARD_COLS - 1);
+        A->move_to(A_r, A_c);
 
-        int dr[8] = {-1,-1, 0, 1, 1, 1, 0,-1};
-        int dc[8] = { 0, 1, 1, 1, 0,-1,-1,-1};
-
-        int newA_row = std::clamp(A_row + dr[move_dir] * move_dist, 0, BOARD_ROWS - 1);
-        int newA_col = std::clamp(A_col + dc[move_dir] * move_dist, 0, BOARD_COLS - 1);
-
-        A_row = newA_row;
-        A_col = newA_col;
-        A->move_to(A_row, A_col);
-
-        // -------- Move B --------
+        // B moves
         B->get_move_direction(move_dir, move_dist);
+        B_r = std::clamp(B_r + dr[move_dir] * move_dist, 0, BOARD_ROWS - 1);
+        B_c = std::clamp(B_c + dc[move_dir] * move_dist, 0, BOARD_COLS - 1);
+        B->move_to(B_r, B_c);
 
-        int newB_row = std::clamp(B_row + dr[move_dir] * move_dist, 0, BOARD_ROWS - 1);
-        int newB_col = std::clamp(B_col + dc[move_dir] * move_dist, 0, BOARD_COLS - 1);
-
-        B_row = newB_row;
-        B_col = newB_col;
-        B->move_to(B_row, B_col);
-
-        // Collision rule
-        if (A_row == B_row && A_col == B_col) {
-            std::cout << "Robots collide! Each loses 1 armor.\n";
+        //
+        // ================= COLLISION =================
+        //
+        if (A_r == B_r && A_c == B_c)
+        {
+            std::cout << "COLLISION! Both robots take 1 damage.\n";
             A->take_damage(1);
             B->take_damage(1);
         }
 
-        // Final check
-        if (A->get_health() <= 0) { std::cout << "B WINS!\n"; break; }
-        if (B->get_health() <= 0) { std::cout << "A WINS!\n"; break; }
+        //
+        // ================= WIN CHECK =================
+        //
+        if (A->get_health() <= 0)
+        {
+            std::cout << "\n===== B WINS! =====\n";
+            break;
+        }
+        if (B->get_health() <= 0)
+        {
+            std::cout << "\n===== A WINS! =====\n";
+            break;
+        }
+
+        round++;
     }
 
-    dlclose(handle1);
-    dlclose(handle2);
+    dlclose(h1);
+    dlclose(h2);
     return 0;
 }
